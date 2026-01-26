@@ -1,0 +1,32 @@
+---
+alwaysApply: true
+---
+# Project Constitution
+
+This is a platform-style desktop developer tool, not a feature collection.
+
+Modules must be:
+- dynamically registered
+- extensible
+- never hard-coded
+
+UI must not contain any platform-specific logic.
+All Android / iOS / HarmonyOS differences must be isolated via an Adapter layer.
+
+The interaction model follows DevToys:
+- left-side module navigation
+- right-side working panel
+
+The final application must be plug-and-play:
+- no manual environment setup
+- no manual dependency installation
+- usable immediately after install
+
+UI styling and icons must follow:
+- use Tailwind CSS for visual styling
+- use Iconify for icons
+
+AI must not:
+- introduce features not defined in the PRD
+- hard-code module lists or routes
+- add cloud, account, or remote capabilities

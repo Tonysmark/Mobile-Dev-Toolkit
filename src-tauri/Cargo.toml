@@ -1,0 +1,24 @@
+[package]
+name = "mobile-dev-toolkit"
+version = "0.1.0"
+description = "Mobile Dev Toolkit - 跨平台真机开发辅助工具"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.9.5", features = [] }
+tauri-plugin-shell = "2.3.4"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+
+[features]
+# This feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
