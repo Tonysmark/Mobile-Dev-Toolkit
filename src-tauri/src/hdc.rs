@@ -16,6 +16,17 @@ pub struct DeviceList {
     pub devices: Vec<Device>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInfo {
+    pub model: Option<String>,
+    pub brand: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub battery_level: Option<u8>,
+    pub battery_status: Option<String>,
+}
+
 struct ScreenRecordSession {
     child: std::process::Child,
     remote_path: String,
@@ -29,6 +40,27 @@ fn screen_recordings() -> &'static Mutex<HashMap<String, ScreenRecordSession>> {
 
 fn device_key(device_id: &Option<String>) -> String {
     device_id.clone().unwrap_or_else(|| "default".to_string())
+}
+
+fn hdc_shell(device_id: &Option<String>, args: &[&str]) -> Result<String, String> {
+    use std::process::Command;
+
+    let mut cmd = tools::command_for("hdc");
+    if let Some(device) = device_id {
+        cmd.args(&["-t", device]);
+    }
+    cmd.arg("shell");
+    cmd.args(args);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("执行 hdc shell 失败: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
 }
 
 #[tauri::command]
@@ -75,6 +107,49 @@ pub async fn hdc_list_targets() -> Result<DeviceList, String> {
     }
 
     Ok(DeviceList { devices })
+}
+
+#[tauri::command]
+pub async fn hdc_device_info(device_id: Option<String>) -> Result<DeviceInfo, String> {
+    let model = hdc_shell(&device_id, &["param", "get", "ro.product.model"]).ok();
+    let brand = hdc_shell(&device_id, &["param", "get", "ro.product.brand"]).ok();
+    let name = hdc_shell(&device_id, &["param", "get", "ro.product.name"]).ok();
+    let version = hdc_shell(&device_id, &["param", "get", "ro.build.version.release"]).ok();
+
+    let mut info = DeviceInfo {
+        model,
+        brand,
+        name,
+        version,
+        battery_level: None,
+        battery_status: None,
+    };
+
+    if let Ok(battery_dump) = hdc_shell(&device_id, &["hidumper", "-s", "3301"]) {
+        for line in battery_dump.lines() {
+            let trimmed = line.trim().to_lowercase();
+            if trimmed.contains("level") {
+                if let Some(value) = trimmed.split(':').nth(1) {
+                    if let Ok(level) = value.trim().parse::<u8>() {
+                        info.battery_level = Some(level);
+                    }
+                }
+            }
+            if trimmed.contains("status") {
+                if let Some(value) = trimmed.split(':').nth(1) {
+                    let status = match value.trim() {
+                        "charging" => "charging",
+                        "discharging" => "discharging",
+                        "full" => "full",
+                        _ => "unknown",
+                    };
+                    info.battery_status = Some(status.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(info)
 }
 
 #[tauri::command]

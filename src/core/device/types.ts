@@ -9,6 +9,9 @@ export type DeviceStatus = "device" | "offline" | "unauthorized" | "no-permissio
 /** 设备平台类型 */
 export type DevicePlatform = "android" | "ios" | "harmonyos" | "unknown";
 
+/** 电量状态 */
+export type BatteryStatus = "charging" | "discharging" | "full" | "unknown";
+
 /** 设备信息 */
 export interface Device {
   /** 设备唯一标识符 */
@@ -25,6 +28,10 @@ export interface Device {
   version?: string;
   /** 设备名称（可选） */
   name?: string;
+  /** 电量百分比（可选，0-100） */
+  batteryLevel?: number;
+  /** 电量状态（可选） */
+  batteryStatus?: BatteryStatus;
 }
 
 /** 依赖工具状态 */

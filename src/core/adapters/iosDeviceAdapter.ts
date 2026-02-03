@@ -3,7 +3,12 @@
  * 封装 idevice 系列命令
  */
 import type { Device } from "../device/types";
-import type { DeviceAdapter, DeviceFeature } from "./deviceAdapter";
+import type {
+  DeviceAdapter,
+  DeviceFeature,
+  DeviceInfo,
+  MirrorStreamInfo,
+} from "./deviceAdapter";
 
 const iosFeatures: DeviceFeature[] = [
   "list-devices",
@@ -91,6 +96,18 @@ export class IosDeviceAdapter implements DeviceAdapter {
   async listDevices(): Promise<Device[]> {
     const stdout = await runCommand("idevice_id", ["-l"]);
     return toDeviceList(stdout);
+  }
+
+  async getDeviceInfo(): Promise<DeviceInfo> {
+    throw new Error("当前平台暂不支持设备信息获取");
+  }
+
+  async startMirrorStream(): Promise<MirrorStreamInfo> {
+    throw new Error("当前平台暂不支持实时镜像功能");
+  }
+
+  async stopMirrorStream(): Promise<void> {
+    throw new Error("当前平台暂不支持实时镜像功能");
   }
 
   async installApp(deviceId: string, appPath: string): Promise<string> {

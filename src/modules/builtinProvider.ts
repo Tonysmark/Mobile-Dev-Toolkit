@@ -14,8 +14,6 @@ export const builtinModuleProvider: ModuleProvider = {
       { base64CodecModule },
       { deviceManagerModule },
       { appManagerModule },
-      { screenshotModule },
-      { screenRecorderModule },
       { fileExplorerModule },
       { certificateManagerModule },
     ] = await Promise.all([
@@ -23,8 +21,6 @@ export const builtinModuleProvider: ModuleProvider = {
       import("./base64-codec/definition"),
       import("./device-manager/definition"),
       import("./app-manager/definition"),
-      import("./screenshot/definition"),
-      import("./screen-recorder/definition"),
       import("./file-explorer/definition"),
       import("./certificate-manager/definition"),
     ]);
@@ -34,8 +30,6 @@ export const builtinModuleProvider: ModuleProvider = {
       base64CodecModule,
       deviceManagerModule,
       appManagerModule,
-      screenshotModule,
-      screenRecorderModule,
       fileExplorerModule,
       certificateManagerModule,
     ];

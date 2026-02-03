@@ -3,15 +3,22 @@
  * 封装 adb 设备操作命令
  */
 import type { Device } from "../device/types";
-import type { DeviceAdapter, DeviceFeature } from "./deviceAdapter";
+import type {
+  DeviceAdapter,
+  DeviceFeature,
+  DeviceInfo,
+  MirrorStreamInfo,
+} from "./deviceAdapter";
 
 const androidFeatures: DeviceFeature[] = [
   "list-devices",
+  "device-info",
   "install-app",
   "uninstall-app",
   "list-packages",
   "screenshot",
   "screenrecord",
+  "mirror-stream",
   "push-file",
   "pull-file",
   "push-certificate",
@@ -69,6 +76,24 @@ export class AndroidDeviceAdapter implements DeviceAdapter {
       model: device.model,
       platform: "android",
     }));
+  }
+
+  async getDeviceInfo(deviceId: string): Promise<DeviceInfo> {
+    const invokeFn = await getInvoke();
+    ensureInvoke(invokeFn);
+    return invokeFn("adb_device_info", { deviceId });
+  }
+
+  async startMirrorStream(deviceId: string): Promise<MirrorStreamInfo> {
+    const invokeFn = await getInvoke();
+    ensureInvoke(invokeFn);
+    return invokeFn("adb_start_mirror", { deviceId });
+  }
+
+  async stopMirrorStream(deviceId: string): Promise<void> {
+    const invokeFn = await getInvoke();
+    ensureInvoke(invokeFn);
+    await invokeFn("adb_stop_mirror", { deviceId });
   }
 
   async installApp(deviceId: string, appPath: string): Promise<string> {

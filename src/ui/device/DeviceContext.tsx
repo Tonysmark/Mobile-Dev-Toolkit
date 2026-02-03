@@ -10,11 +10,21 @@ import {
   useCallback,
   ReactNode,
   useMemo,
+  useRef,
 } from "react";
 import type { Device, DevicePlatform } from "../../core/device/types";
 import type { CoreKernel } from "../../core/kernel";
-import type { DeviceAdapter } from "../../core/adapters/deviceAdapter";
+import type { DeviceAdapter, DeviceInfo } from "../../core/adapters/deviceAdapter";
 import { isDeviceAdapter } from "../../core/adapters/deviceAdapter";
+
+function deviceInfoChanged(device: Device, info: DeviceInfo) {
+  return Object.entries(info).some(([key, value]) => {
+    if (value === undefined) {
+      return false;
+    }
+    return device[key as keyof Device] !== value;
+  });
+}
 
 /** 设备上下文值 */
 export interface DeviceContextValue {
@@ -64,6 +74,14 @@ export function DeviceProvider({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isTauri, setIsTauri] = useState(false);
+  const deviceInfoCacheRef = useRef(
+    new Map<string, { ts: number; info: DeviceInfo }>(),
+  );
+  const deviceInfoInFlightRef = useRef(new Set<string>());
+  const missingCountRef = useRef(new Map<string, number>());
+
+  const deviceInfoTTL = 10000;
+  const missingThreshold = 2;
 
   const deviceAdapters = useMemo(() => {
     if (!kernel) {
@@ -115,27 +133,44 @@ export function DeviceProvider({
       const failures = results.filter((result) => result.status === "rejected");
 
       if (failures.length === results.length) {
-        throw new Error("所有平台设备列表获取失败");
+        setError("所有平台设备列表获取失败");
+        return;
       }
 
       if (failures.length > 0) {
         setError("部分平台设备列表获取失败，请检查依赖状态");
       }
 
-      setDevices(convertedDevices);
+      setDevices((prev) => {
+        const prevMap = new Map(prev.map((device) => [device.id, device]));
+        const mergedDevices = convertedDevices.map((device) => ({
+          ...prevMap.get(device.id),
+          ...device,
+        }));
+        const nextIds = new Set(mergedDevices.map((device) => device.id));
+        const retained = prev.filter((device) => {
+          if (nextIds.has(device.id)) {
+            missingCountRef.current.set(device.id, 0);
+            return false;
+          }
+          const count = (missingCountRef.current.get(device.id) ?? 0) + 1;
+          missingCountRef.current.set(device.id, count);
+          return count < missingThreshold;
+        });
+        const nextDevices = [...mergedDevices, ...retained];
+        if (
+          selectedDeviceId &&
+          !nextDevices.some((device) => device.id === selectedDeviceId)
+        ) {
+          setSelectedDeviceId(null);
+        }
+        return nextDevices;
+      });
 
-      // 如果当前选中的设备不在列表中，清除选择
-      if (
-        selectedDeviceId &&
-        !convertedDevices.some((d) => d.id === selectedDeviceId)
-      ) {
-        setSelectedDeviceId(null);
-      }
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "获取设备列表失败",
       );
-      setDevices([]);
     } finally {
       setLoading(false);
     }
@@ -171,6 +206,48 @@ export function DeviceProvider({
   const deviceAdapter = selectedDevice
     ? deviceAdapters.find((adapter) => adapter.metadata.platform === selectedDevice.platform) ?? null
     : null;
+
+  useEffect(() => {
+    let active = true;
+    const fetchInfo = async () => {
+      if (!selectedDevice || !deviceAdapter) {
+        return;
+      }
+      if (!deviceAdapter.supportsFeature("device-info")) {
+        return;
+      }
+      const deviceId = selectedDevice.id;
+      const now = Date.now();
+      const cached = deviceInfoCacheRef.current.get(deviceId);
+      if (cached && now - cached.ts < deviceInfoTTL) {
+        return;
+      }
+      if (deviceInfoInFlightRef.current.has(deviceId)) {
+        return;
+      }
+      deviceInfoInFlightRef.current.add(deviceId);
+      try {
+        const info = await deviceAdapter.getDeviceInfo(deviceId);
+        deviceInfoCacheRef.current.set(deviceId, { ts: now, info });
+        if (!active) return;
+        setDevices((prev) =>
+          prev.map((device) =>
+            device.id === deviceId && deviceInfoChanged(device, info)
+              ? { ...device, ...info }
+              : device,
+          ),
+        );
+      } catch (e) {
+        console.warn("获取设备信息失败:", e);
+      } finally {
+        deviceInfoInFlightRef.current.delete(deviceId);
+      }
+    };
+    void fetchInfo();
+    return () => {
+      active = false;
+    };
+  }, [deviceAdapter, selectedDevice]);
 
   const value: DeviceContextValue = {
     devices,

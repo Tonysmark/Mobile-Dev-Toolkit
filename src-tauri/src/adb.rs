@@ -1,8 +1,16 @@
 use serde::{Deserialize, Serialize};
 use crate::tools;
+use crossbeam_channel::Sender;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::io::Read;
+use std::net::{TcpListener, TcpStream};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
+use std::thread;
+use std::time::{Duration, SystemTime};
+use tungstenite::Message;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Device {
@@ -22,13 +30,152 @@ struct ScreenRecordSession {
     start_time: u64,
 }
 
+struct MirrorStreamSession {
+    child: std::process::Child,
+    device_id: Option<String>,
+    forward_port: u16,
+    stop_flag: Arc<AtomicBool>,
+    clients: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    url: String,
+}
+
 fn screen_recordings() -> &'static Mutex<HashMap<String, ScreenRecordSession>> {
     static STORE: OnceLock<Mutex<HashMap<String, ScreenRecordSession>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn mirror_streams() -> &'static Mutex<HashMap<String, MirrorStreamSession>> {
+    static STORE: OnceLock<Mutex<HashMap<String, MirrorStreamSession>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn device_key(device_id: &Option<String>) -> String {
     device_id.clone().unwrap_or_else(|| "default".to_string())
+}
+
+fn adb_shell(device_id: &Option<String>, args: &[&str]) -> Result<String, String> {
+    use std::process::Command;
+
+    let mut cmd = tools::command_for("adb");
+    if let Some(device) = device_id {
+        cmd.args(&["-s", device]);
+    }
+    cmd.arg("shell");
+    cmd.args(args);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("执行 adb shell 失败: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MirrorStreamInfo {
+    pub url: String,
+}
+
+fn resolve_scrcpy_server_path() -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("MDT_SCRCPY_SERVER_PATH") {
+        let candidate = std::path::PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    if let Ok(path) = std::env::var("SCRCPY_SERVER_PATH") {
+        let candidate = std::path::PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let candidates = [
+        "/opt/homebrew/share/scrcpy/scrcpy-server",
+        "/usr/local/share/scrcpy/scrcpy-server",
+        "/usr/share/scrcpy/scrcpy-server",
+    ];
+    for path in candidates {
+        let candidate = std::path::PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    if let Some(scrcpy_path) = tools::resolve_tool_path("scrcpy") {
+        if let Some(prefix) = scrcpy_path.parent().and_then(|p| p.parent()) {
+            let candidate = prefix.join("share").join("scrcpy").join("scrcpy-server");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_scrcpy_version() -> Option<String> {
+    if let Ok(version) = std::env::var("MDT_SCRCPY_SERVER_VERSION") {
+        let trimmed = version.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+
+    let output = tools::command_for("scrcpy").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next()?.trim();
+    let mut parts = line.split_whitespace();
+    let first = parts.next()?;
+    if first != "scrcpy" {
+        return None;
+    }
+    let version = parts.next()?.trim();
+    if version.is_empty() {
+        return None;
+    }
+    Some(version.to_string())
+}
+
+fn pick_free_port() -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("分配本地端口失败: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("获取本地端口失败: {}", e))?
+        .port();
+    Ok(port)
+}
+
+fn connect_with_retry(port: u16, stop_flag: &Arc<AtomicBool>) -> Result<TcpStream, String> {
+    let addr = format!("127.0.0.1:{}", port);
+    for _ in 0..30 {
+        if stop_flag.load(Ordering::SeqCst) {
+            return Err("镜像连接被终止".to_string());
+        }
+        match TcpStream::connect(&addr) {
+            Ok(stream) => return Ok(stream),
+            Err(_) => thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    Err("连接 scrcpy 镜像流失败".to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInfo {
+    pub model: Option<String>,
+    pub brand: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub battery_level: Option<u8>,
+    pub battery_status: Option<String>,
 }
 
 #[tauri::command]
@@ -69,6 +216,46 @@ pub async fn adb_devices() -> Result<DeviceList, String> {
     }
 
     Ok(DeviceList { devices })
+}
+
+#[tauri::command]
+pub async fn adb_device_info(device_id: Option<String>) -> Result<DeviceInfo, String> {
+    let model = adb_shell(&device_id, &["getprop", "ro.product.model"]).ok();
+    let brand = adb_shell(&device_id, &["getprop", "ro.product.brand"]).ok();
+    let name = adb_shell(&device_id, &["getprop", "ro.product.name"]).ok();
+    let version = adb_shell(&device_id, &["getprop", "ro.build.version.release"]).ok();
+
+    let mut info = DeviceInfo {
+        model,
+        brand,
+        name,
+        version,
+        battery_level: None,
+        battery_status: None,
+    };
+
+    if let Ok(battery_dump) = adb_shell(&device_id, &["dumpsys", "battery"]) {
+        for line in battery_dump.lines() {
+            let trimmed = line.trim();
+            if let Some(value) = trimmed.strip_prefix("level:") {
+                if let Ok(level) = value.trim().parse::<u8>() {
+                    info.battery_level = Some(level);
+                }
+            }
+            if let Some(value) = trimmed.strip_prefix("status:") {
+                let status = match value.trim() {
+                    "2" => "charging",
+                    "3" => "discharging",
+                    "4" => "discharging",
+                    "5" => "full",
+                    _ => "unknown",
+                };
+                info.battery_status = Some(status.to_string());
+            }
+        }
+    }
+
+    Ok(info)
 }
 
 #[tauri::command]
@@ -286,6 +473,267 @@ pub async fn adb_stop_screenrecord(
     let _ = rm_cmd.output();
 
     Ok(final_path)
+}
+
+#[tauri::command]
+pub async fn adb_start_mirror(device_id: Option<String>) -> Result<MirrorStreamInfo, String> {
+    use std::process::Stdio;
+
+    let device_key = device_key(&device_id);
+    let mut store = mirror_streams()
+        .lock()
+        .map_err(|_| "镜像状态锁定失败".to_string())?;
+
+    if store.contains_key(&device_key) {
+        let existing = store.get(&device_key).map(|s| s.url.clone());
+        if let Some(url) = existing {
+            return Ok(MirrorStreamInfo { url });
+        }
+        return Err("当前设备镜像已启动".to_string());
+    }
+
+    let server_path = resolve_scrcpy_server_path()
+        .ok_or_else(|| "未找到 scrcpy-server，请安装 scrcpy 或设置 MDT_SCRCPY_SERVER_PATH".to_string())?;
+    let server_version = resolve_scrcpy_version().unwrap_or_else(|| "3.3.4".to_string());
+
+    let mut push_cmd = tools::command_for("adb");
+    if let Some(device) = device_id.clone() {
+        push_cmd.args(&["-s", &device]);
+    }
+    push_cmd
+        .args(&["push", server_path.to_str().unwrap(), "/data/local/tmp/scrcpy-server.jar"]);
+    let output = push_cmd
+        .output()
+        .map_err(|e| format!("推送 scrcpy-server 失败: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let forward_port = pick_free_port()?;
+    let mut forward_cmd = tools::command_for("adb");
+    if let Some(device) = device_id.clone() {
+        forward_cmd.args(&["-s", &device]);
+    }
+    forward_cmd.args(&[
+        "forward",
+        &format!("tcp:{}", forward_port),
+        "localabstract:scrcpy",
+    ]);
+    let output = forward_cmd
+        .output()
+        .map_err(|e| format!("建立 adb forward 失败: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let mut cmd = tools::command_for("adb");
+    if let Some(device) = device_id.clone() {
+        cmd.args(&["-s", &device]);
+    }
+    cmd.args(&[
+        "shell",
+        "CLASSPATH=/data/local/tmp/scrcpy-server.jar",
+        "app_process",
+        "/",
+        "com.genymobile.scrcpy.Server",
+        &server_version,
+        "tunnel_forward=true",
+        "audio=false",
+        "control=false",
+        "max_size=1920",
+        "max_fps=60",
+        "video_codec=h264",
+        "send_device_meta=false",
+        "send_frame_meta=false",
+        "send_codec_meta=false",
+        "send_dummy_byte=false",
+        "raw_stream=true",
+        "cleanup=false",
+    ])
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("启动 scrcpy server 失败: {}", e))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法获取 scrcpy server 错误输出".to_string())?;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("启动镜像服务失败: {}", e))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("设置镜像服务失败: {}", e))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("获取镜像服务地址失败: {}", e))?;
+    let url = format!("ws://127.0.0.1:{}/mirror", addr.port());
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let clients: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+    let prebuffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let prebuffer_limit = 2 * 1024 * 1024;
+
+    let stop_flag_reader = stop_flag.clone();
+    let clients_reader = clients.clone();
+    let prebuffer_reader = prebuffer.clone();
+    thread::spawn(move || {
+        let mut stream = match connect_with_retry(forward_port, &stop_flag_reader) {
+            Ok(stream) => stream,
+            Err(err) => {
+                println!("[mirror] scrcpy stream connect failed: {}", err);
+                return;
+            }
+        };
+        let mut buf = [0u8; 16 * 1024];
+        let mut logged = false;
+        while !stop_flag_reader.load(Ordering::SeqCst) {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if !logged {
+                        println!("[mirror] scrcpy stream started, first chunk {} bytes", n);
+                        logged = true;
+                    }
+                    let chunk = buf[..n].to_vec();
+                    if let Ok(mut cache) = prebuffer_reader.lock() {
+                        cache.extend_from_slice(&chunk);
+                        if cache.len() > prebuffer_limit {
+                            let excess = cache.len() - prebuffer_limit;
+                            cache.drain(0..excess);
+                        }
+                    }
+                    let mut list = match clients_reader.lock() {
+                        Ok(list) => list,
+                        Err(_) => break,
+                    };
+                    list.retain(|tx| tx.send(chunk.clone()).is_ok());
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        let mut reader = stderr;
+        let mut buf = [0u8; 8 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let output = String::from_utf8_lossy(&buf[..n]);
+                    let content = output.trim();
+                    if !content.is_empty() {
+                        println!("[mirror][scrcpy] {}", content);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let stop_flag_server = stop_flag.clone();
+    let clients_server = clients.clone();
+    let prebuffer_server = prebuffer.clone();
+    thread::spawn(move || {
+        while !stop_flag_server.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let websocket = tungstenite::accept(stream);
+                    if websocket.is_err() {
+                        continue;
+                    }
+                    let mut websocket = websocket.unwrap();
+                    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+                    if let Ok(mut list) = clients_server.lock() {
+                        list.push(tx);
+                    }
+                    let stop_flag_client = stop_flag_server.clone();
+                    let initial = prebuffer_server
+                        .lock()
+                        .map(|cache| cache.clone())
+                        .unwrap_or_default();
+                    thread::spawn(move || {
+                        if initial.is_empty() {
+                            println!("[mirror] client connected, prebuffer empty");
+                        } else {
+                            println!(
+                                "[mirror] client connected, prebuffer {} bytes",
+                                initial.len()
+                            );
+                        }
+                        if !initial.is_empty() {
+                            let _ = websocket.write_message(Message::Binary(initial));
+                        }
+                        while !stop_flag_client.load(Ordering::SeqCst) {
+                            match rx.recv_timeout(Duration::from_millis(200)) {
+                                Ok(chunk) => {
+                                    if websocket
+                                        .write_message(Message::Binary(chunk))
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                                Err(_) => break,
+                            }
+                        }
+                        let _ = websocket.close(None);
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    store.insert(
+        device_key,
+        MirrorStreamSession {
+            child,
+            device_id: device_id.clone(),
+            forward_port,
+            stop_flag,
+            clients,
+            url: url.clone(),
+        },
+    );
+
+    Ok(MirrorStreamInfo { url })
+}
+
+#[tauri::command]
+pub async fn adb_stop_mirror(device_id: Option<String>) -> Result<(), String> {
+    let device_key = device_key(&device_id);
+    let mut store = mirror_streams()
+        .lock()
+        .map_err(|_| "镜像状态锁定失败".to_string())?;
+
+    let session = store
+        .remove(&device_key)
+        .ok_or_else(|| "当前设备没有正在进行的镜像".to_string())?;
+
+    session.stop_flag.store(true, Ordering::SeqCst);
+    if let Ok(mut list) = session.clients.lock() {
+        list.clear();
+    }
+
+    let mut forward_remove = tools::command_for("adb");
+    if let Some(device) = &session.device_id {
+        forward_remove.args(&["-s", device]);
+    }
+    forward_remove.args(&["forward", "--remove", &format!("tcp:{}", session.forward_port)]);
+    let _ = forward_remove.output();
+
+    let mut child = session.child;
+    let _ = child.kill();
+    let _ = child.wait();
+
+    Ok(())
 }
 
 #[tauri::command]

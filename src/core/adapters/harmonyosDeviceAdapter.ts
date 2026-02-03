@@ -3,10 +3,16 @@
  * 封装 hdc 基础命令
  */
 import type { Device } from "../device/types";
-import type { DeviceAdapter, DeviceFeature } from "./deviceAdapter";
+import type {
+  DeviceAdapter,
+  DeviceFeature,
+  DeviceInfo,
+  MirrorStreamInfo,
+} from "./deviceAdapter";
 
 const harmonyFeatures: DeviceFeature[] = [
   "list-devices",
+  "device-info",
   "install-app",
   "uninstall-app",
   "list-packages",
@@ -89,6 +95,18 @@ export class HarmonyOSDeviceAdapter implements DeviceAdapter {
       model: device.model,
       platform: "harmonyos",
     }));
+  }
+
+  async getDeviceInfo(deviceId: string): Promise<DeviceInfo> {
+    return invokeHdc<DeviceInfo>("hdc_device_info", { deviceId });
+  }
+
+  async startMirrorStream(): Promise<MirrorStreamInfo> {
+    throw new Error("当前平台暂不支持实时镜像功能");
+  }
+
+  async stopMirrorStream(): Promise<void> {
+    throw new Error("当前平台暂不支持实时镜像功能");
   }
 
   async installApp(deviceId: string, appPath: string): Promise<string> {
