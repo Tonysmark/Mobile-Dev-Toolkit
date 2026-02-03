@@ -29,6 +29,16 @@ export interface Adapter {
   metadata: AdapterMetadata;
   /** 检查适配器是否支持指定的能力 */
   supports: (capability: string) => boolean;
+  /**
+   * 初始化钩子（可选）
+   * 适配器创建后由内核统一调用
+   */
+  initialize?: () => void | Promise<void>;
+  /**
+   * 释放钩子（可选）
+   * 应用退出或适配器卸载时调用
+   */
+  dispose?: () => void | Promise<void>;
 }
 
 /**

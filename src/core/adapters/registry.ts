@@ -5,6 +5,11 @@
  */
 import type { Adapter, AdapterId } from "./types";
 
+export type AdapterRegistrySnapshot = {
+  adapterIds: AdapterId[];
+  platforms: string[];
+};
+
 export class AdapterRegistry {
   // 存储所有适配器，以适配器ID为键
   private readonly adapters = new Map<AdapterId, Adapter>();
@@ -14,6 +19,9 @@ export class AdapterRegistry {
    * @param adapter 适配器实例
    */
   register(adapter: Adapter): void {
+    if (this.adapters.has(adapter.metadata.id)) {
+      throw new Error(`Adapter already registered: ${adapter.metadata.id}`);
+    }
     this.adapters.set(adapter.metadata.id, adapter);
   }
 
@@ -50,5 +58,25 @@ export class AdapterRegistry {
    */
   findAllByCapability(capability: string): Adapter[] {
     return this.list().filter((adapter) => adapter.supports(capability));
+  }
+
+  async initializeAll(): Promise<void> {
+    for (const adapter of this.adapters.values()) {
+      await adapter.initialize?.();
+    }
+  }
+
+  async disposeAll(): Promise<void> {
+    for (const adapter of this.adapters.values()) {
+      await adapter.dispose?.();
+    }
+  }
+
+  getSnapshot(): AdapterRegistrySnapshot {
+    const adapters = this.list();
+    return {
+      adapterIds: adapters.map((adapter) => adapter.metadata.id),
+      platforms: adapters.map((adapter) => adapter.metadata.platform),
+    };
   }
 }

@@ -4,6 +4,7 @@
  * 实现模块的初始化、激活、停用和销毁流程
  */
 import type { EventBus } from "../events/eventBus";
+import { EventNames } from "../events/events";
 import type {
   ModuleActivationMode,
   ModuleContext,
@@ -12,6 +13,11 @@ import type {
   ModuleInstance,
 } from "./types";
 import { ModuleRegistry } from "./registry";
+
+export type ModuleManagerSnapshot = {
+  activeExclusiveModuleId: ModuleId | null;
+  activeModuleIds: ModuleId[];
+};
 
 export class ModuleManager {
   // 当前激活的模块ID集合（包含 parallel/background）
@@ -64,7 +70,7 @@ export class ModuleManager {
       }
     }
     // 发射模块就绪事件
-    this.eventBus.emit("modules:ready", {
+    this.eventBus.emit(EventNames.ModulesReady, {
       moduleIds: Array.from(this.instances.keys()),
     });
   }
@@ -89,9 +95,7 @@ export class ModuleManager {
     if (activationMode === "exclusive") {
       // 仅切换独占工作区模块，不影响 parallel/background
       if (this.activeExclusiveModuleId) {
-        const current = this.instances.get(this.activeExclusiveModuleId);
-        await current?.lifecycle?.onDeactivate?.();
-        this.activeModuleIds.delete(this.activeExclusiveModuleId);
+        await this.deactivate(this.activeExclusiveModuleId);
       }
       this.activeExclusiveModuleId = moduleId;
     }
@@ -100,10 +104,47 @@ export class ModuleManager {
     await next.lifecycle?.onActivate?.();
 
     // 发射模块激活事件
-    this.eventBus.emit("module:activated", {
+    this.eventBus.emit(EventNames.ModuleActivated, {
       moduleId,
       activationMode,
       activeExclusiveModuleId: this.activeExclusiveModuleId,
+      activeModuleIds: Array.from(this.activeModuleIds),
+    });
+  }
+
+  /**
+   * 停用指定模块
+   * 适用于 parallel/background 与 exclusive 模块
+   */
+  async deactivate(moduleId: ModuleId): Promise<void> {
+    const instance = this.instances.get(moduleId);
+    if (!instance) {
+      return;
+    }
+    if (!this.activeModuleIds.has(moduleId)) {
+      return;
+    }
+    await instance.lifecycle?.onDeactivate?.();
+    this.activeModuleIds.delete(moduleId);
+    if (this.activeExclusiveModuleId === moduleId) {
+      this.activeExclusiveModuleId = null;
+    }
+    this.eventBus.emit(EventNames.ModuleDeactivated, {
+      moduleId,
+      activeExclusiveModuleId: this.activeExclusiveModuleId,
+      activeModuleIds: Array.from(this.activeModuleIds),
+    });
+  }
+
+  /**
+   * 停用所有模块（包含 parallel/background）
+   */
+  async deactivateAll(): Promise<void> {
+    const activeIds = Array.from(this.activeModuleIds);
+    for (const moduleId of activeIds) {
+      await this.deactivate(moduleId);
+    }
+    this.eventBus.emit(EventNames.ModulesDeactivated, {
       activeModuleIds: Array.from(this.activeModuleIds),
     });
   }
@@ -113,6 +154,7 @@ export class ModuleManager {
    * 调用所有模块的销毁生命周期钩子，清理资源
    */
   async disposeAll(): Promise<void> {
+    await this.deactivateAll();
     for (const instance of this.instances.values()) {
       await instance.lifecycle?.onDispose?.();
     }
@@ -135,5 +177,12 @@ export class ModuleManager {
    */
   getActiveModuleIds(): ModuleId[] {
     return Array.from(this.activeModuleIds);
+  }
+
+  getSnapshot(): ModuleManagerSnapshot {
+    return {
+      activeExclusiveModuleId: this.activeExclusiveModuleId,
+      activeModuleIds: Array.from(this.activeModuleIds),
+    };
   }
 }

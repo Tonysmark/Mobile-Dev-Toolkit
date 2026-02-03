@@ -5,19 +5,23 @@
 
 // 导出核心类
 export { CoreKernel } from "./kernel";
+export type { KernelSnapshot, KernelModuleSnapshot } from "./kernel";
 export { AdapterRegistry } from "./adapters/registry";
 export { EventBus } from "./events/eventBus";
+export {
+  EventNames,
+  type EventName,
+  type ModuleActivatedPayload,
+  type ModuleDeactivatedPayload,
+} from "./events/events";
 export { ModuleLoader } from "./modules/loader";
 export { ModuleManager } from "./modules/manager";
+export type { ModuleManagerSnapshot } from "./modules/manager";
 export { ModuleRegistry } from "./modules/registry";
 
 // 导出适配器相关类型
-export type {
-  Adapter,
-  AdapterId,
-  AdapterMetadata,
-  SystemCommandAdapter,
-} from "./adapters/types";
+export type { Adapter, AdapterId, AdapterMetadata, SystemCommandAdapter } from "./adapters/types";
+export type { AdapterRegistrySnapshot } from "./adapters/registry";
 export type { DeviceAdapter, DeviceFeature } from "./adapters/deviceAdapter";
 export { isDeviceAdapter } from "./adapters/deviceAdapter";
 

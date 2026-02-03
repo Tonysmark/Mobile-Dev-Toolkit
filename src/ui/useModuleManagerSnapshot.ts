@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import type { CoreKernel, EventBus, ModuleId, ModuleManager } from "../core";
+import type { CoreKernel, ModuleId } from "../core";
+import {
+  EventNames,
+  type ModuleDeactivatedPayload,
+  type ModuleActivatedPayload,
+} from "../core";
 
 type ModuleManagerSnapshot = {
   activeExclusiveModuleId: ModuleId | null;
@@ -11,45 +16,40 @@ const emptySnapshot: ModuleManagerSnapshot = {
   activeModuleIds: [],
 };
 
-function readSnapshot(manager?: ModuleManager): ModuleManagerSnapshot {
-  if (!manager) {
-    return emptySnapshot;
-  }
-  return {
-    activeExclusiveModuleId: manager.getActiveModuleId(),
-    activeModuleIds: manager.getActiveModuleIds(),
-  };
-}
-
-type ModuleActivatedPayload = {
-  moduleId: ModuleId;
-  activationMode: string;
-  activeExclusiveModuleId: ModuleId | null;
-  activeModuleIds: ModuleId[];
-};
-
 export function useModuleManagerSnapshot(
   kernel: CoreKernel,
 ): ModuleManagerSnapshot {
-  const manager = kernel.getModuleManager();
   const eventBus = kernel.getEventBus();
 
-  const [snapshot, setSnapshot] = useState<ModuleManagerSnapshot>(() =>
-    readSnapshot(manager),
-  );
+  const [snapshot, setSnapshot] = useState<ModuleManagerSnapshot>(() => {
+    const modules = kernel.getSnapshot().modules;
+    return {
+      activeExclusiveModuleId: modules.activeExclusiveModuleId,
+      activeModuleIds: modules.activeModuleIds,
+    };
+  });
 
   useEffect(() => {
-    if (!manager) {
-      setSnapshot(emptySnapshot);
-      return;
-    }
-
     // 初始化时读取一次状态
-    setSnapshot(readSnapshot(manager));
+    const initial = kernel.getSnapshot().modules;
+    setSnapshot({
+      activeExclusiveModuleId: initial.activeExclusiveModuleId,
+      activeModuleIds: initial.activeModuleIds,
+    });
 
     // 订阅模块激活事件，实时更新状态
-    const unsubscribe = eventBus.on<ModuleActivatedPayload>(
-      "module:activated",
+    const unsubscribeActivated = eventBus.on<ModuleActivatedPayload>(
+      EventNames.ModuleActivated,
+      (payload) => {
+        setSnapshot({
+          activeExclusiveModuleId: payload.activeExclusiveModuleId,
+          activeModuleIds: payload.activeModuleIds,
+        });
+      },
+    );
+
+    const unsubscribeDeactivated = eventBus.on<ModuleDeactivatedPayload>(
+      EventNames.ModuleDeactivated,
       (payload) => {
         setSnapshot({
           activeExclusiveModuleId: payload.activeExclusiveModuleId,
@@ -59,16 +59,21 @@ export function useModuleManagerSnapshot(
     );
 
     // 订阅模块就绪事件，确保初始化完成后状态同步
-    const unsubscribeReady = eventBus.on("modules:ready", () => {
-      setSnapshot(readSnapshot(manager));
+    const unsubscribeReady = eventBus.on(EventNames.ModulesReady, () => {
+      const next = kernel.getSnapshot().modules;
+      setSnapshot({
+        activeExclusiveModuleId: next.activeExclusiveModuleId,
+        activeModuleIds: next.activeModuleIds,
+      });
     });
 
     // 清理订阅
     return () => {
-      unsubscribe();
+      unsubscribeActivated();
+      unsubscribeDeactivated();
       unsubscribeReady();
     };
-  }, [manager, eventBus]);
+  }, [eventBus, kernel]);
 
   return snapshot;
 }

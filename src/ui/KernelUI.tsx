@@ -14,13 +14,7 @@ function toManifestList(manifests: ModuleManifest[]): ModuleManifest[] {
 }
 
 export function KernelUI({ kernel }: KernelUIProps) {
-  const registry = kernel.getModuleRegistry();
-  const manager = kernel.getModuleManager();
-
-  // 仅使用模块清单构建导航列表，避免接触模块实例
-  const manifests = toManifestList(
-    registry.list().map((definition) => definition.manifest),
-  );
+  const manifests = toManifestList(kernel.getSnapshot().modules.manifests);
 
   const { activeExclusiveModuleId, activeModuleIds } =
     useModuleManagerSnapshot(kernel);
@@ -58,7 +52,7 @@ export function KernelUI({ kernel }: KernelUIProps) {
           activeModuleId={activeExclusiveModuleId}
           onActivate={(moduleId) => {
             // UI 只通过 ModuleManager 公共 API 请求激活，不控制规则
-            void manager?.activate(moduleId);
+            void kernel.activateModule(moduleId);
           }}
         />
         <ModuleWorkspace

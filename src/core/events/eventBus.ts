@@ -2,6 +2,7 @@
  * 事件总线
  * 提供发布-订阅模式的事件系统，用于模块间解耦通信
  */
+import { assertEventName } from "./events";
 
 export type EventHandler<T = unknown> = (payload: T) => void;
 
@@ -20,6 +21,7 @@ export class EventBus {
    * @returns 取消订阅的函数
    */
   on<T = unknown>(event: string, handler: EventHandler<T>): () => void {
+    assertEventName(event);
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set());
     }
@@ -37,6 +39,7 @@ export class EventBus {
    * @param handler 事件处理函数
    */
   off(event: string, handler: EventHandler<unknown>): void {
+    assertEventName(event);
     const handlers = this.listeners.get(event);
     if (handlers) {
       handlers.delete(handler);
@@ -53,6 +56,7 @@ export class EventBus {
    * @param payload 事件负载数据
    */
   emit<T = unknown>(event: string, payload?: T): void {
+    assertEventName(event);
     const handlers = this.listeners.get(event);
     if (handlers) {
       // 复制 handlers 集合，避免在执行过程中修改原集合导致的问题

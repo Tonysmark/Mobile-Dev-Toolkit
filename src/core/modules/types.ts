@@ -118,7 +118,10 @@ export interface ModuleContext {
    * 发射事件到系统
    * 仅限系统级事件，不承载应用状态或UI上下文
    */
-  emitEvent: (event: string, payload?: unknown) => void;
+  emitEvent: (
+    event: import("../events/events").EventName,
+    payload?: unknown,
+  ) => void;
 }
 
 /**
